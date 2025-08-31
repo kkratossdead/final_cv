@@ -1,0 +1,37 @@
+# Environnement virtuel Python
+.venv/
+venv/
+env/
+
+# Fichiers de cache Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# Fichiers de rapport d'analyse (contiennent potentiellement des données sensibles)
+analyse_cv_*.txt
+
+# Fichiers de configuration avec clés API (pour sécurité)
+config_local.py
+.streamlit/secrets.toml
+# Décommentez la ligne suivante si vous voulez exclure config.py
+# config.py
+
+# Fichiers système
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Logs
+*.log
+
+# Fichiers temporaires
+*.tmp
+*.temp
