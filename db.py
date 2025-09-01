@@ -3,7 +3,7 @@ from datetime import datetime
 import hashlib
 import json
 
-DB_PATH = "cv_analyses.db"
+DB_PATH = "new.db"
 
 def init_db():
     conn = sqlite3.connect(DB_PATH)

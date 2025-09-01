@@ -1,27 +1,19 @@
 import os
 import json
+import time
+import random
 from datetime import datetime
-from io import BytesIO
 from dotenv import load_dotenv
 import streamlit as st
-
-# ADD get_job_offer_by_id to your imports from db
 from db import (
     init_db, insert_analysis, get_all_analyses,
     save_job_offer, get_analyses_by_job_offer,
     get_all_job_offers, get_job_offer_stats,
-    get_job_offer_by_id,   # <-- add this
+    get_job_offer_by_id,
 )
-
-
-# === Gemini SDK ===
 from google import genai
 from google.genai import types
 
-# ---------------------------
-# Tarifs Gemini 2.5 Flash-Lite
-# ---------------------------
-# Prix par 1 MILLION de tokens
 PRICE_INPUT_PER_M  = 0.10   # $ / 1e6 tokens input
 PRICE_OUTPUT_PER_M = 0.40   # $ / 1e6 tokens output
 
@@ -122,6 +114,23 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
+# CSS animation pour flash de sélection
+st.markdown(
+    """
+    <style>
+    @keyframes flashOfferSel {0%{background:#059669;color:#fff;}70%{background:#059669;color:#fff;}100%{background:transparent;color:inherit;}}
+    .offer-flash{animation:flashOfferSel 1s ease-in-out;padding:4px 10px;border-radius:6px;font-weight:600;display:inline-block;margin-top:4px;}
+    /* Compactage des expanders d'analyses */
+    details[data-testid="stExpander"]{margin:0px 0 !important; border:1px solid #e5e7eb; border-radius:6px;}
+    details[data-testid="stExpander"] > summary{padding:4px 10px !important; font-weight:500;}
+    details[data-testid="stExpander"]:hover{border-color:#059669;}
+    /* Réduction de l'espace interne dans le contenu */
+    details[data-testid="stExpander"] .streamlit-expanderContent{padding-top:4px !important; padding-bottom:6px !important;}
+    </style>
+    """,
+    unsafe_allow_html=True
+)
+
 def initialize_gemini():
     # Pour initialiser la clé API dans l'environnement (Windows) :
     # set GEMINI_API_KEY=sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
@@ -136,126 +145,132 @@ def initialize_gemini():
         # api_key = "sk-ect"
     return genai.Client()
 
-def analyze_cv_with_gemini(pdf_bytes: bytes, job_offer_text: str, client: genai.Client):
-    """
-    Envoie le PDF directement au modèle (pas d'OCR local).
-    Demande une réponse JSON stricte (response_mime_type='application/json').
-    """
+def analyze_cv_with_gemini(pdf_bytes: bytes, job_offer_text: str, client: genai.Client, max_retries: int = 4):
+    """Appel Gemini avec retries exponentiels simples sur 429/RESOURCE_EXHAUSTED."""
+    contents = [
+        types.Part.from_bytes(data=pdf_bytes, mime_type="application/pdf"),
+        types.Part.from_text(text=f"Voici l'offre d'emploi à analyser :\n{job_offer_text}"),
+        types.Part.from_text(text=PROMPT_SYSTEM),
+    ]
+    for attempt in range(max_retries):
+        try:
+            resp = client.models.generate_content(
+                model=MODEL,
+                contents=contents,
+                config=types.GenerateContentConfig(
+                    temperature=0.0,
+                    response_mime_type="application/json",
+                ),
+            )
+            output_text = resp.text or ""
+            um = getattr(resp, "usage_metadata", None)
+            tokens = {
+                "prompt": getattr(um, "input_token_count", None),
+                "completion": getattr(um, "output_token_count", None),
+                "total": getattr(um, "total_token_count", None),
+            }
+            return {"content": output_text, "tokens": tokens}
+        except Exception as e:
+            msg = str(e)
+            is_quota = ("429" in msg) or ("RESOURCE_EXHAUSTED" in msg.upper())
+            if attempt < max_retries - 1 and is_quota:
+                wait = (2 ** attempt) + random.uniform(0, 0.75)
+                st.warning(f"⏳ Quota/rate limit atteint. Nouvel essai dans {wait:.1f}s (tentative {attempt+2}/{max_retries})")
+                time.sleep(wait)
+                continue
+            st.error(f"❌ Erreur Gemini : {e}")
+            return None
+
+def _parse_analysis_json(analysis_text: str):
+    clean = analysis_text.strip()
+    if clean.startswith("```json"):
+        clean = clean[len("```json"):].strip()
+    if clean.endswith("```"):
+        clean = clean[:-3].strip()
     try:
-        contents = [
-            types.Part.from_bytes(data=pdf_bytes, mime_type="application/pdf"),
-            types.Part.from_text(text=f"Voici l'offre d'emploi à analyser :\n{job_offer_text}"),
-            types.Part.from_text(text=PROMPT_SYSTEM),
-        ]
-
-        resp = client.models.generate_content(
-            model=MODEL,
-            contents=contents,
-            config=types.GenerateContentConfig(
-                temperature=0.0,
-                response_mime_type="application/json",
-                # max_output_tokens=4096,
-            ),
-        )
-
-        # Texte attendu = JSON pur
-        output_text = resp.text or ""
-
-        # Usage tokens (si dispo)
-        um = getattr(resp, "usage_metadata", None)
-        tokens = {
-            "prompt": getattr(um, "input_token_count", None),
-            "completion": getattr(um, "output_token_count", None),
-            "total": getattr(um, "total_token_count", None),
-        }
-
-        return {"content": output_text, "tokens": tokens}
-
-    except Exception as e:
-        st.error(f"❌ Erreur Gemini : {e}")
+        return json.loads(clean)
+    except json.JSONDecodeError:
         return None
 
-def display_analysis(analysis_text, filename):
-    """Affiche l'analyse structurée (scores, listes, etc.)."""
-    try:
-        clean = analysis_text.strip()
-        if clean.startswith("```json"):
-            clean = clean[len("```json"):].strip()
-        if clean.endswith("```"):
-            clean = clean[:-3].strip()
+def _render_analysis(analysis: dict, filename: str):
+    st.header(f"📊 Analyse de {filename}")
+    score_global    = analysis.get("score_global", 0)
+    score_technique = analysis.get("score_technique")
+    score_experience= analysis.get("score_experience")
+    score_formation = analysis.get("score_formation")
+    score_soft      = analysis.get("score_soft_skills")
 
-        analysis = json.loads(clean)
-
-        st.header(f"📊 Analyse de {filename}")
-
-        score_global    = analysis.get("score_global", 0)
-        score_technique = analysis.get("score_technique")
-        score_experience= analysis.get("score_experience")
-        score_formation = analysis.get("score_formation")
-        score_soft      = analysis.get("score_soft_skills")
-
-        st.subheader(f"🎯 Score Global : {score_global}/100")
-        if score_global is not None:
-            if score_global >= 80:
-                st.success(f"Excellent candidat ({score_global}/100)")
-            elif score_global >= 60:
-                st.warning(f"Bon candidat ({score_global}/100)")
-            else:
-                st.error(f"Candidat à améliorer ({score_global}/100)")
-            st.progress(min(max(score_global, 0), 100) / 100)
-
-        st.subheader("🔢 Détails des sous-scores")
-        cols = st.columns(4)
-        cols[0].metric("Technique", f"{score_technique}/40" if score_technique is not None else "N/A")
-        cols[1].metric("Expérience", f"{score_experience}/30" if score_experience is not None else "N/A")
-        cols[2].metric("Formation", f"{score_formation}/15" if score_formation is not None else "N/A")
-        cols[3].metric("Soft skills", f"{score_soft}/15" if score_soft is not None else "N/A")
-
-        recommandation = analysis.get("recommandation", "Non spécifiée")
-        st.subheader("✅ Recommandation")
-        if isinstance(recommandation, str) and "Recommandé" in recommandation:
-            st.success(f"✅ **{recommandation}**")
-        elif isinstance(recommandation, str) and "considérer" in recommandation.lower():
-            st.warning(f"⚠️ **{recommandation}**")
+    st.subheader(f"🎯 Score Global : {score_global}/100")
+    if score_global is not None:
+        if score_global >= 80:
+            st.success(f"Excellent candidat ({score_global}/100)")
+        elif score_global >= 60:
+            st.warning(f"Bon candidat ({score_global}/100)")
         else:
-            st.error(f"❌ **{recommandation}**")
+            st.error(f"Candidat à améliorer ({score_global}/100)")
+        st.progress(min(max(score_global, 0), 100) / 100)
 
-        col1, col2 = st.columns(2)
-        with col1:
-            st.subheader("💪 Points Forts")
-            for pt in analysis.get("points_forts", []) or []:
-                st.write(f"• {pt}")
-            st.subheader("✅ Compétences Matchées")
-            for comp in analysis.get("competences_matchees", []) or []:
-                st.write(f"• {comp}")
-        with col2:
-            st.subheader("⚠️ Points Faibles")
-            for pt in analysis.get("points_faibles", []) or []:
-                st.write(f"• {pt}")
-            st.subheader("❌ Compétences Manquantes")
-            for comp in analysis.get("competences_manquantes", []) or []:
-                st.write(f"• {comp}")
+    st.subheader("🔢 Détails des sous-scores")
+    cols = st.columns(4)
+    cols[0].metric("Technique", f"{score_technique}/40" if score_technique is not None else "N/A")
+    cols[1].metric("Expérience", f"{score_experience}/30" if score_experience is not None else "N/A")
+    cols[2].metric("Formation", f"{score_formation}/15" if score_formation is not None else "N/A")
+    cols[3].metric("Soft skills", f"{score_soft}/15" if score_soft is not None else "N/A")
 
-        st.subheader("💼 Expérience Pertinente")
-        st.write(analysis.get("experience_pertinente", "Non spécifiée"))
-        st.subheader("📝 Commentaires Détaillés")
-        st.write(analysis.get("commentaires", "Aucun commentaire"))
+    recommandation = analysis.get("recommandation", "Non spécifiée")
+    st.subheader("✅ Recommandation")
+    if isinstance(recommandation, str) and "Recommandé" in recommandation:
+        st.success(f"✅ **{recommandation}**")
+    elif isinstance(recommandation, str) and "considérer" in recommandation.lower():
+        st.warning(f"⚠️ **{recommandation}**")
+    else:
+        st.error(f"❌ **{recommandation}**")
 
-        st.subheader("📋 Informations Techniques")
-        col3, col4, col5 = st.columns(3)
-        with col3:
-            st.metric("Pages analysées", analysis.get("pages_analysees", "N/A"))
-        with col4:
-            st.metric("Méthode", analysis.get("methode_analyse", "N/A"))
-        with col5:
-            st.metric("Date", datetime.now().strftime("%d/%m/%Y %H:%M"))
+    col1, col2 = st.columns(2)
+    with col1:
+        st.subheader("💪 Points Forts")
+        for pt in analysis.get("points_forts", []) or []:
+            st.write(f"• {pt}")
+        st.subheader("✅ Compétences Matchées")
+        for comp in analysis.get("competences_matchees", []) or []:
+            st.write(f"• {comp}")
+    with col2:
+        st.subheader("⚠️ Points Faibles")
+        for pt in analysis.get("points_faibles", []) or []:
+            st.write(f"• {pt}")
+        st.subheader("❌ Compétences Manquantes")
+        for comp in analysis.get("competences_manquantes", []) or []:
+            st.write(f"• {comp}")
 
-        return analysis
+    st.subheader("💼 Expérience Pertinente")
+    st.write(analysis.get("experience_pertinente", "Non spécifiée"))
+    st.subheader("📝 Commentaires Détaillés")
+    st.write(analysis.get("commentaires", "Aucun commentaire"))
 
-    except json.JSONDecodeError:
+    st.subheader("📋 Informations Techniques")
+    col3, col4, col5 = st.columns(3)
+    with col3:
+        st.metric("Pages analysées", analysis.get("pages_analysees", "N/A"))
+    with col4:
+        st.metric("Méthode", analysis.get("methode_analyse", "N/A"))
+    with col5:
+        st.metric("Date", datetime.now().strftime("%d/%m/%Y %H:%M"))
+
+def display_analysis_conditional(analysis_text: str, filename: str, multi: bool):
+    analysis = _parse_analysis_json(analysis_text)
+    if not analysis:
         st.error("❌ Erreur lors du parsing de l'analyse JSON")
         st.text_area("Analyse brute :", analysis_text, height=300)
         return None
+    score_global = analysis.get("score_global", "?")
+    recommandation = analysis.get("recommandation", "?")
+    header = f"📄 {filename} — {score_global}/100 — {recommandation}"
+    if multi:
+        with st.expander(header, expanded=False):
+            _render_analysis(analysis, filename)
+    else:
+        _render_analysis(analysis, filename)
+    return analysis
 
 
 def _parse_dt_any(s: str):
@@ -281,9 +296,17 @@ def main():
     """Application Streamlit — version Gemini 2.5 Flash-Lite"""
     init_db()
 
+    # Navigation persistante + redirection programmée avant création du widget
+    if "navigate_to_analysis" in st.session_state:
+        # Placer la cible avant instanciation du radio pour éviter StreamlitAPIException
+        st.session_state["nav_page"] = "Analyse de CV"
+        del st.session_state["navigate_to_analysis"]
+    if "nav_page" not in st.session_state:
+        st.session_state["nav_page"] = "Analyse de CV"
     page = st.sidebar.radio(
         "Navigation",
-        ["Analyse de CV", "Gestion des offres", "Historique des analyses"]
+        ["Analyse de CV", "Gestion des offres", "Historique des analyses"],
+        key="nav_page"
     )
 
     if page == "Analyse de CV":
@@ -298,8 +321,6 @@ def main():
             else:
                 st.error("❌ GEMINI_API_KEY non configurée")
                 st.info("Ajoutez GEMINI_API_KEY dans vos variables d'environnement")
-            st.subheader("🎛️ Paramètres")
-            st.markdown("---")
             st.markdown("**💡 Instructions:**")
             st.markdown("1. Choisissez une offre d'emploi existante (onglet « Gestion des offres » pour en créer)")
             st.markdown("2. Uploadez un ou plusieurs CV (PDF)")
@@ -316,12 +337,35 @@ def main():
                 label_map = {
                     f"{row[1]} — {row[2]}  ({row[0][:8]}…)": row[0] for row in job_offers_sorted
                 }
+                # Pré-sélection si une offre vient d'être créée (basé sur l'ID forcé)
+                forced_id = None
+                if "_force_selected_offer" in st.session_state:
+                    forced_id = st.session_state._force_selected_offer
+                    del st.session_state._force_selected_offer
+                options_labels = list(label_map.keys())
+                forced_index = 0
+                if forced_id:
+                    forced_label = next((lbl for lbl, _id in label_map.items() if _id == forced_id), None)
+                    if forced_label and forced_label in options_labels:
+                        forced_index = options_labels.index(forced_label)
                 selected_label = st.selectbox(
                     "Sélectionnez une offre d'emploi (la plus récente apparaît en premier) :",
-                    options=list(label_map.keys()),
+                    options=options_labels,
+                    index=forced_index
                 )
+                # Sécurisation contre un éventuel retour None / clé manquante
+                if not selected_label or selected_label not in label_map:
+                    selected_label = options_labels[0]
                 selected_job_offer_id = label_map[selected_label]
-                st.info(f"Offre sélectionnée: {selected_label}")
+                # Gestion du flash si changement
+                if "_last_offer_id" not in st.session_state:
+                    st.session_state._last_offer_id = None
+                changed = selected_job_offer_id != st.session_state._last_offer_id
+                if changed:
+                    st.session_state._last_offer_id = selected_job_offer_id
+                    st.markdown(f"<div class='offer-flash'>✅ Offre sélectionnée : {selected_label}</div>", unsafe_allow_html=True)
+                else:
+                    st.caption(f"Offre sélectionnée : {selected_label}")
             else:
                 selected_job_offer_id = None
                 st.warning("Aucune offre disponible. Créez-en d’abord dans l’onglet « Gestion des offres ».")
@@ -335,16 +379,17 @@ def main():
                 accept_multiple_files=True
             )
             if uploaded_files:
-                st.success(f"✅ {len(uploaded_files)} fichier(s) sélectionné(s)")
-                for file in uploaded_files:
-                    st.write(f"• {file.name}")
+                count = len(uploaded_files)
+                st.success(f"✅ {count} fichier(s) sélectionné(s)")
+                if count == 1:
+                    st.write(f"• {uploaded_files[0].name}")
         # --- éviter UnboundLocalError sur les reruns Streamlit ---
         analyses = []
         job_offer_id = None
         job_title = ""
         job_offer_text = ""
 
-        if st.button("🔍 Analyser les CV", type="primary", use_container_width=True):
+    if st.button("🔍 Analyser les CV", type="primary", width="stretch"):
             if not selected_job_offer_id:
                 st.error("⚠️ Aucune offre sélectionnée. Rendez-vous dans « Gestion des offres » pour en créer ou en choisir une.")
                 return
@@ -381,6 +426,8 @@ def main():
             status_text = st.empty()
             analyses = []
 
+            multi_files = len(uploaded_files) > 1
+            analyses_container = st.container()
             for i, uploaded_file in enumerate(uploaded_files, start=1):
                 status_text.text(f"Analyse en cours : {uploaded_file.name} ({i}/{len(uploaded_files)})")
                 progress_bar.progress((i - 1) / len(uploaded_files))
@@ -398,17 +445,15 @@ def main():
                     total_tok = tokens_used.get("total") or (in_tok + out_tok)
                     cost_cv = (in_tok / 1_000_000) * PRICE_INPUT_PER_M + (out_tok / 1_000_000) * PRICE_OUTPUT_PER_M
 
-                    st.success(f"✅ Analyse terminée pour {uploaded_file.name}")
-                    parsed = display_analysis(analysis_text, uploaded_file.name)
+                    # Affichage condensé : pas de message de succès individuel si plusieurs fichiers
+                    if not multi_files:
+                        st.success(f"✅ Analyse terminée pour {uploaded_file.name}")
+                    with analyses_container:
+                        parsed = display_analysis_conditional(analysis_text, uploaded_file.name, multi_files)
 
                     if parsed:
                         insert_analysis(uploaded_file.name, parsed, job_offer_id)
 
-                    # st.info(
-                    #     # f"🧮 **Tokens** : {total_tok}  "
-                    #     # f"(prompt {in_tok} / completion {out_tok})  "
-                    #     # f"— **Coût estimé : ${cost_cv:.6f}**"
-                    # )
 
                     analyses.append({
                         "filename": uploaded_file.name,
@@ -416,7 +461,7 @@ def main():
                         "tokens":   {"prompt": in_tok, "completion": out_tok, "total": total_tok},
                         "cost_usd": cost_cv
                     })
-                    st.markdown("---")
+                    # Pas de séparateur pour garder les expanders groupés
                 else:
                     st.error(f"❌ Échec de l'analyse pour {uploaded_file.name}")
 
@@ -444,7 +489,7 @@ def main():
                     data=json.dumps(results_json, ensure_ascii=False, indent=2),
                     file_name=f"analyse_cv_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
                     mime="application/json",
-                    use_container_width=True
+                    width="stretch"
                 )
 
                           
@@ -457,15 +502,37 @@ def main():
         with st.form("create_job_offer_form", clear_on_submit=True):
             new_job_title = st.text_input("Titre de l'offre", placeholder="Ex: Développeur Python Senior - Tech Corp")
             new_job_content = st.text_area("Contenu de l'offre", height=200, placeholder="Description, missions, compétences requises…")
-            submitted = st.form_submit_button("Enregistrer l'offre", type="primary", use_container_width=False)
+            submitted = st.form_submit_button("Enregistrer l'offre", type="primary", width="content")
 
         if submitted:
-            if not new_job_title.strip() or not new_job_content.strip():
+            title_clean = new_job_title.strip()
+            content_clean = new_job_content.strip()
+            if not title_clean or not content_clean:
                 st.error("Veuillez renseigner le titre et le contenu de l'offre.")
             else:
-                new_id = save_job_offer(new_job_title.strip(), new_job_content.strip())
-                st.success(f"✅ Offre créée (ID: {new_id[:8]}…). Elle est maintenant disponible dans « Analyse de CV ».")
-                st.toast("Offre ajoutée !", icon="✅")
+                # Vérifier doublon (même titre OU même couple titre+contenu)
+                existing = get_all_job_offers() or []
+                duplicate = None
+                for off in existing:
+                    # off: (id, title, content, created_at, ...?)
+                    same_title = len(off) > 1 and off[1].strip().lower() == title_clean.lower()
+                    same_content = len(off) > 2 and off[2].strip() == content_clean
+                    if same_title and (same_content or True):  # si titre identique on considère doublon UX
+                        duplicate = off
+                        break
+                if duplicate:
+                    st.warning(f"⚠️ Cette offre existe déjà (ID: {duplicate[0][:8]}…). Pas de création.")
+                    st.info("Astuce : modifiez légèrement le titre si vous souhaitez vraiment en créer une nouvelle.")
+                else:
+                    new_id = save_job_offer(title_clean, content_clean)
+                    st.success(f"✅ Offre créée (ID: {new_id[:8]}…). Redirection vers l'analyse…")
+                    st.toast("Offre ajoutée !", icon="✅")
+                    # Préparer redirection
+                    st.session_state._last_offer_id = new_id  # pour pré-sélection future
+                    st.session_state._force_selected_offer = new_id
+                    # Signaler une redirection vers Analyse de CV au prochain cycle
+                    st.session_state.navigate_to_analysis = True
+                    st.rerun()
 
         tab1, tab2 = st.tabs(["📊 Vue d'ensemble", "🔍 Détails par offre"])
 
@@ -478,7 +545,7 @@ def main():
                 df = pd.DataFrame(job_offers, columns=["ID", "Titre", "Date de création", "Nb CV analysés"])
                 df["ID court"] = df["ID"].apply(lambda x: x[:8] + "...")
                 df_display = df[["ID court", "Titre", "Date de création", "Nb CV analysés"]]
-                st.dataframe(df_display, use_container_width=True)
+                st.dataframe(df_display, width="stretch")
 
                 col1, col2, col3 = st.columns(3)
                 with col1:
@@ -562,7 +629,7 @@ def main():
                         "Commentaire": (r[6][:100] + "...") if len(str(r[6])) > 100 else r[6],
                         "Date": r[7]
                     } for r in rows],
-                    use_container_width=True
+                    width="stretch"
                 )
                 col1, col2, col3 = st.columns(3)
                 scores = [r[1] for r in rows if r[1] is not None]

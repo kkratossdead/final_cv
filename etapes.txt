@@ -1,0 +1,73 @@
+# Installation et Lancement du Projet (PC Windows totalement vierge)
+
+1. Installer Python
+- Ouvre ton navigateur 
+- Va sur https://www.python.org/downloads/windows/
+- Clique sur "Download Python 3.x.x" (version 64-bit).
+- Lance l'installeur téléchargé.
+- IMPORTANT : coche la case "Add Python to PATH" en bas.
+- Clique sur "Install Now" puis termine l'installation.
+- Vérifie l'installation :
+  - Ouvre PowerShell (Win + X puis "Windows PowerShell").
+  - Tape : python --version
+  - Tu dois voir une version (ex: Python 3.13.x).
+
+2. Installer Git (optionnel mais conseillé)
+- Va sur https://git-scm.com/downloads
+- Télécharge l'installeur Windows.
+- Laisse les options par défaut et termine.
+- Vérifie : git --version
+
+3. Installer Visual Studio Code
+- Va sur https://code.visualstudio.com/
+- Télécharge "Download for Windows".
+- Installe (laisser les options par défaut + cocher "Add to PATH" si proposé).
+- Lance VS Code.
+
+4. Installer l'extension Python dans VS Code
+- Ouvre VS Code.
+- Onglet Extensions (icône carré à gauche).
+- Cherche "Python" (éditeur : Microsoft) et installe.
+
+5. Télécharger le projet
+Option A (ZIP) :
+- Télécharge l'archive ZIP dans ce lien:  https://github.com/kkratossdead/final_cv.
+- Décompresse dans un dossier, ex: C:\CV_GEMINI
+
+Option B (Git clone) :
+- Dans Terminal :
+  git clone https://github.com/kkratossdead/final_cv
+  cd final_cv
+
+6. Ouvrir le dossier dans VS Code
+- VS Code > File > Open Folder > Choisir le dossier du projet.
+
+7. Créer un environnement virtuel Python
+Dans PowerShell à la racine du projet :
+  python -m venv .venv
+Activer l'environnement :
+  .venv\Scripts\Activate.ps1
+(Voir le nom (.venv) apparaître au début de la ligne.)
+
+8. Installer les dépendances
+  pip install -r requirements.txt
+
+9. Configurer la clé API Gemini
+- Tu dois obtenir une clé API Gemini (Google AI Studio).
+- Copie la clé .
+- Dans le fichier .env (à créer à la racine du projet si absent) ajoute :
+  GEMINI_API_KEY="TA_CLE_ICI"
+
+
+10. Lancer l'application Streamlit
+Assure-toi que l'environnement virtuel est activé : (.venv)
+  execute la commande: streamlit run app.py
+Le navigateur s'ouvre sur l'appli (si ce n'est pas le cas, copie l'URL locale affichée, ex: http://localhost:8501).
+
+11. Utilisation rapide
+- Onglet "Gestion des offres" : créer une offre (titre + contenu).
+- Onglet "Analyse de CV" : sélectionner l'offre, uploader des PDF, cliquer "Analyser".
+- Onglet "Historique des analyses" : voir les résultats stockés.
+
+
+C'est tout. Projet prêt !
