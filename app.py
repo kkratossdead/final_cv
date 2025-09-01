@@ -389,7 +389,8 @@ def main():
         job_title = ""
         job_offer_text = ""
 
-    if st.button("🔍 Analyser les CV", type="primary", width="stretch"):
+        # Bouton et traitement d'analyse uniquement dans cette page
+        if st.button("🔍 Analyser les CV", type="primary", width="stretch"):
             if not selected_job_offer_id:
                 st.error("⚠️ Aucune offre sélectionnée. Rendez-vous dans « Gestion des offres » pour en créer ou en choisir une.")
                 return
@@ -397,14 +398,11 @@ def main():
                 st.error("⚠️ Veuillez uploader au moins un CV")
                 return
 
-            # Fetch the full job offer (title + content) by ID
             job_row = get_job_offer_by_id(selected_job_offer_id)
-            # Accept either dict or tuple return shapes
             if isinstance(job_row, dict):
                 job_title = job_row.get("title") or job_row.get("titre") or ""
                 job_offer_text = job_row.get("content") or job_row.get("texte") or ""
             else:
-                # Common tuple: (ID, Title, Content, CreatedAt) -> adjust if your DB differs
                 job_title = job_row[1] if len(job_row) > 1 else ""
                 job_offer_text = job_row[2] if len(job_row) > 2 else ""
 
@@ -412,56 +410,42 @@ def main():
                 st.error("⚠️ Contenu de l’offre introuvable. Vérifiez votre base de données et la fonction get_job_offer_by_id.")
                 return
 
-            job_offer_id = selected_job_offer_id  # we reuse the existing ID
+            job_offer_id = selected_job_offer_id
             st.info(f"🧾 Offre utilisée : {job_title} ({job_offer_id[:8]}…)")
-
             st.markdown("---")
-
             client = initialize_gemini()
-
             st.markdown("---")
             st.header("📊 Résultats de l'analyse")
 
             progress_bar = st.progress(0)
             status_text = st.empty()
             analyses = []
-
             multi_files = len(uploaded_files) > 1
             analyses_container = st.container()
             for i, uploaded_file in enumerate(uploaded_files, start=1):
                 status_text.text(f"Analyse en cours : {uploaded_file.name} ({i}/{len(uploaded_files)})")
                 progress_bar.progress((i - 1) / len(uploaded_files))
-
                 pdf_bytes = uploaded_file.read()
                 result = analyze_cv_with_gemini(pdf_bytes, job_offer_text, client)
-
                 if result:
                     analysis_text = result["content"]
-                    tokens_used   = result["tokens"]
-
-                    # Coût estimé (si usage connu)
-                    in_tok  = tokens_used.get("prompt") or 0
+                    tokens_used = result["tokens"]
+                    in_tok = tokens_used.get("prompt") or 0
                     out_tok = tokens_used.get("completion") or 0
                     total_tok = tokens_used.get("total") or (in_tok + out_tok)
                     cost_cv = (in_tok / 1_000_000) * PRICE_INPUT_PER_M + (out_tok / 1_000_000) * PRICE_OUTPUT_PER_M
-
-                    # Affichage condensé : pas de message de succès individuel si plusieurs fichiers
                     if not multi_files:
                         st.success(f"✅ Analyse terminée pour {uploaded_file.name}")
                     with analyses_container:
                         parsed = display_analysis_conditional(analysis_text, uploaded_file.name, multi_files)
-
                     if parsed:
                         insert_analysis(uploaded_file.name, parsed, job_offer_id)
-
-
                     analyses.append({
                         "filename": uploaded_file.name,
                         "analysis": parsed if parsed else analysis_text,
-                        "tokens":   {"prompt": in_tok, "completion": out_tok, "total": total_tok},
+                        "tokens": {"prompt": in_tok, "completion": out_tok, "total": total_tok},
                         "cost_usd": cost_cv
                     })
-                    # Pas de séparateur pour garder les expanders groupés
                 else:
                     st.error(f"❌ Échec de l'analyse pour {uploaded_file.name}")
 
@@ -469,7 +453,6 @@ def main():
             status_text.text("✅ Analyse terminée !")
             if len(analyses) > 0:
                 st.success(f"🎉 {len(analyses)}/{len(uploaded_files)} CV(s) analysé(s) avec succès")
-
                 results_json = {
                     "metadata": {
                         "date": datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
@@ -483,7 +466,6 @@ def main():
                     },
                     "analyses": analyses
                 }
-
                 st.download_button(
                     label="📥 Télécharger résultats (JSON)",
                     data=json.dumps(results_json, ensure_ascii=False, indent=2),
